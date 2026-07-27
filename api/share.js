@@ -19,7 +19,13 @@
  * ------------------------------------------------------------
  */
 
+import { createHash } from 'crypto';
+
 const DATA_PATH = 'data/shared.json';
+
+function hashPassword(pw){
+  return createHash('sha256').update(String(pw)).digest('hex');
+}
 
 function ghHeaders(token){
   return {
@@ -80,7 +86,12 @@ export default async function handler(req, res){
       const { items } = await readFile(repo, token);
       // 최신순으로 정렬해서 반환
       items.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-      return res.status(200).json({ items });
+      // 비밀번호 해시는 클라이언트로 절대 내려보내지 않음 — 있는지 여부만 표시
+      const sanitized = items.map(it => {
+        const { passwordHash, ...rest } = it;
+        return { ...rest, hasPassword: !!passwordHash };
+      });
+      return res.status(200).json({ items: sanitized });
     }catch(e){
       return res.status(502).json({ error: { message: e.message } });
     }
@@ -95,12 +106,14 @@ export default async function handler(req, res){
     if(!payload || !Array.isArray(payload.units) || !payload.units.length){
       return res.status(400).json({ error: { message: '공유할 내용이 비어 있습니다.' } });
     }
+    const password = payload.password ? String(payload.password) : '';
     const entry = {
       id: 'share_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
       createdAt: new Date().toISOString(),
       themeSummary: String(payload.themeSummary || '').slice(0, 200),
       unitCount: payload.units.length,
-      units: payload.units
+      units: payload.units,
+      passwordHash: password ? hashPassword(password) : null
     };
 
     // 동시 저장 충돌(409) 대비 최대 2회 재시도
@@ -133,13 +146,22 @@ export default async function handler(req, res){
     if(!id){
       return res.status(400).json({ error: { message: '삭제할 id가 없습니다.' } });
     }
+    const providedPassword = (req.body && req.body.password) ? String(req.body.password) : '';
+
     for(let attempt = 0; attempt < 2; attempt++){
       try{
         const { items, sha } = await readFile(repo, token);
-        const nextItems = items.filter(it => it.id !== id);
-        if(nextItems.length === items.length){
+        const target = items.find(it => it.id === id);
+        if(!target){
           return res.status(404).json({ error: { message: '해당 id를 찾을 수 없습니다.' } });
         }
+        // 비밀번호가 설정된 항목은 반드시 일치해야 삭제 가능. 비밀번호 없이 만든 항목은 기존처럼 그대로 삭제 가능.
+        if(target.passwordHash){
+          if(!providedPassword || hashPassword(providedPassword) !== target.passwordHash){
+            return res.status(403).json({ error: { message: '비밀번호가 일치하지 않습니다.' } });
+          }
+        }
+        const nextItems = items.filter(it => it.id !== id);
         const putRes = await writeFile(repo, token, nextItems, sha);
         if(putRes.ok){
           return res.status(200).json({ ok: true });
