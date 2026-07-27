@@ -3,29 +3,15 @@
  * data/shared.json 파일을 저장 공간으로 사용한다.
  * ------------------------------------------------------------
  * 배포 방법:
- *  1. GitHub → khsjjgg/schooltime 저장소 → 'Add file' → 'Create new file'
- *     파일 이름: api/share.js  → 이 파일 내용 전체 붙여넣기 → Commit
- *  2. GitHub에서 이 저장소만 쓸 수 있는 토큰을 하나 만든다:
- *     GitHub 우측 상단 프로필 → Settings → 맨 아래 'Developer settings'
- *     → 'Personal access tokens' → 'Fine-grained tokens' → 'Generate new token'
- *     - Repository access: 'Only select repositories' → schooltime 선택
- *     - Permissions → 'Contents' → 'Read and write' 로 설정
- *     - 생성 후 나오는 토큰 값을 복사 (한 번만 보여짐)
- *  3. Vercel → schooltime 프로젝트 → Settings → Environment Variables 에 추가:
- *     - GITHUB_TOKEN: 방금 만든 토큰
- *     - GITHUB_REPO: khsjjgg/schooltime   (본인 계정명/저장소명으로)
- *     - APP_SHARED_SECRET: 기존과 동일한 값 (schooltime2026key)
- *  4. Deployments 탭에서 재배포
+ *  1. GitHub → khsjjgg/schooltime 저장소 → api/share.js 파일 열어서 이 내용으로 교체 → Commit
+ *  2. Vercel → schooltime 프로젝트 → Settings → Environment Variables 확인:
+ *     - GITHUB_TOKEN, GITHUB_REPO, APP_SHARED_SECRET: 기존 값 그대로 재사용
+ *     - ADMIN_PASSWORD: log-opinion.js와 동일한 값 (관리자만 아는 비밀번호) — 삭제 권한용
+ *  3. Deployments 탭에서 재배포
  * ------------------------------------------------------------
  */
 
-import { createHash } from 'crypto';
-
 const DATA_PATH = 'data/shared.json';
-
-function hashPassword(pw){
-  return createHash('sha256').update(String(pw)).digest('hex');
-}
 
 function ghHeaders(token){
   return {
@@ -86,12 +72,7 @@ export default async function handler(req, res){
       const { items } = await readFile(repo, token);
       // 최신순으로 정렬해서 반환
       items.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-      // 비밀번호 해시는 클라이언트로 절대 내려보내지 않음 — 있는지 여부만 표시
-      const sanitized = items.map(it => {
-        const { passwordHash, ...rest } = it;
-        return { ...rest, hasPassword: !!passwordHash };
-      });
-      return res.status(200).json({ items: sanitized });
+      return res.status(200).json({ items });
     }catch(e){
       return res.status(502).json({ error: { message: e.message } });
     }
@@ -106,14 +87,13 @@ export default async function handler(req, res){
     if(!payload || !Array.isArray(payload.units) || !payload.units.length){
       return res.status(400).json({ error: { message: '공유할 내용이 비어 있습니다.' } });
     }
-    const password = payload.password ? String(payload.password) : '';
     const entry = {
       id: 'share_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
       createdAt: new Date().toISOString(),
       themeSummary: String(payload.themeSummary || '').slice(0, 200),
       unitCount: payload.units.length,
       units: payload.units,
-      passwordHash: password ? hashPassword(password) : null
+      postedBy: String(payload.postedBy || '').trim().slice(0, 30) || '익명'
     };
 
     // 동시 저장 충돌(409) 대비 최대 2회 재시도
@@ -142,26 +122,25 @@ export default async function handler(req, res){
     if(!process.env.APP_SHARED_SECRET || appToken !== process.env.APP_SHARED_SECRET){
       return res.status(401).json({ error: { message: 'unauthorized' } });
     }
+    if(!process.env.ADMIN_PASSWORD){
+      return res.status(500).json({ error: { message: '서버에 ADMIN_PASSWORD 설정이 없습니다.' } });
+    }
+    const providedPassword = (req.body && req.body.password) ? String(req.body.password) : '';
+    if(providedPassword !== process.env.ADMIN_PASSWORD){
+      return res.status(403).json({ error: { message: '관리자 비밀번호가 일치하지 않습니다.' } });
+    }
     const id = (req.query && req.query.id) || '';
     if(!id){
       return res.status(400).json({ error: { message: '삭제할 id가 없습니다.' } });
     }
-    const providedPassword = (req.body && req.body.password) ? String(req.body.password) : '';
 
     for(let attempt = 0; attempt < 2; attempt++){
       try{
         const { items, sha } = await readFile(repo, token);
-        const target = items.find(it => it.id === id);
-        if(!target){
+        const nextItems = items.filter(it => it.id !== id);
+        if(nextItems.length === items.length){
           return res.status(404).json({ error: { message: '해당 id를 찾을 수 없습니다.' } });
         }
-        // 비밀번호가 설정된 항목은 반드시 일치해야 삭제 가능. 비밀번호 없이 만든 항목은 기존처럼 그대로 삭제 가능.
-        if(target.passwordHash){
-          if(!providedPassword || hashPassword(providedPassword) !== target.passwordHash){
-            return res.status(403).json({ error: { message: '비밀번호가 일치하지 않습니다.' } });
-          }
-        }
-        const nextItems = items.filter(it => it.id !== id);
         const putRes = await writeFile(repo, token, nextItems, sha);
         if(putRes.ok){
           return res.status(200).json({ ok: true });
