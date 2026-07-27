@@ -1,13 +1,14 @@
 /**
  * 의견 수집 로그 API — "의견 반영해서 생성"에 입력된 문구를 익명으로 모아
- * 나중에 키워드·태그클라우드로 확인할 수 있게 한다.
+ * 나중에 원문 그대로 확인·다운로드할 수 있게 한다.
  * (share.js와 완전히 같은 방식: GitHub 저장소의 data/opinions.json 파일 사용)
  * ------------------------------------------------------------
  * 배포 방법:
- *  1. GitHub → khsjjgg/schooltime → 'Add file' → 'Create new file'
- *     파일 이름: api/log-opinion.js → 이 내용 전체 붙여넣기 → Commit
- *  2. 환경변수는 기존 것 그대로 재사용 (GITHUB_TOKEN, GITHUB_REPO, APP_SHARED_SECRET)
- *     — 추가로 설정할 것 없음
+ *  1. GitHub → khsjjgg/schooltime → api/log-opinion.js 파일 열어서 이 내용으로 교체 → Commit
+ *  2. Vercel → schooltime 프로젝트 → Settings → Environment Variables 에 새로 추가:
+ *     - ADMIN_PASSWORD: 관리자(선생님) 본인만 아는 비밀번호 (원문 삭제용, 기존 값들과 다르게 새로 정할 것)
+ *     (GITHUB_TOKEN, GITHUB_REPO, APP_SHARED_SECRET은 기존 것 그대로 재사용)
+ *  3. Deployments 탭에서 재배포
  * ------------------------------------------------------------
  */
 
@@ -48,7 +49,7 @@ async function writeFile(repo, token, items, sha){
 
 export default async function handler(req, res){
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-app-token');
   if(req.method === 'OPTIONS') return res.status(200).end();
 
@@ -101,5 +102,36 @@ export default async function handler(req, res){
     return res.status(502).json({ error: { message: '동시 저장 충돌로 실패했습니다.' } });
   }
 
-  return res.status(405).json({ error: { message: 'GET 또는 POST만 허용됩니다.' } });
+  if(req.method === 'DELETE'){
+    if(!process.env.ADMIN_PASSWORD){
+      return res.status(500).json({ error: { message: '서버에 ADMIN_PASSWORD 설정이 없습니다.' } });
+    }
+    const providedPassword = (req.body && req.body.password) ? String(req.body.password) : '';
+    if(providedPassword !== process.env.ADMIN_PASSWORD){
+      return res.status(403).json({ error: { message: '관리자 비밀번호가 일치하지 않습니다.' } });
+    }
+    const id = (req.query && req.query.id) || '';
+    if(!id) return res.status(400).json({ error: { message: '삭제할 id가 없습니다.' } });
+
+    for(let attempt = 0; attempt < 2; attempt++){
+      try{
+        const { items, sha } = await readFile(repo, token);
+        const nextItems = items.filter(it => it.id !== id);
+        if(nextItems.length === items.length){
+          return res.status(404).json({ error: { message: '해당 id를 찾을 수 없습니다.' } });
+        }
+        const putRes = await writeFile(repo, token, nextItems, sha);
+        if(putRes.ok) return res.status(200).json({ ok: true });
+        if(putRes.status !== 409){
+          const t = await putRes.text();
+          return res.status(502).json({ error: { message: `GitHub 저장 실패 (${putRes.status}) ${t.slice(0,200)}` } });
+        }
+      }catch(e){
+        return res.status(502).json({ error: { message: e.message } });
+      }
+    }
+    return res.status(502).json({ error: { message: '동시 저장 충돌로 실패했습니다.' } });
+  }
+
+  return res.status(405).json({ error: { message: 'GET, POST, DELETE만 허용됩니다.' } });
 }
