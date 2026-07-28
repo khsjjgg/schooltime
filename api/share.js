@@ -56,7 +56,7 @@ async function writeFile(repo, token, items, sha){
 
 export default async function handler(req, res){
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-app-token');
 
   if(req.method === 'OPTIONS') return res.status(200).end();
@@ -156,5 +156,38 @@ export default async function handler(req, res){
     return res.status(502).json({ error: { message: '동시 저장 충돌로 실패했습니다. 다시 시도해 주세요.' } });
   }
 
-  return res.status(405).json({ error: { message: 'GET, POST, DELETE만 허용됩니다.' } });
+  if(req.method === 'PATCH'){
+    const appToken = req.headers['x-app-token'];
+    if(!process.env.APP_SHARED_SECRET || appToken !== process.env.APP_SHARED_SECRET){
+      return res.status(401).json({ error: { message: 'unauthorized' } });
+    }
+    const id = (req.query && req.query.id) || '';
+    if(!id){
+      return res.status(400).json({ error: { message: '공감할 id가 없습니다.' } });
+    }
+
+    for(let attempt = 0; attempt < 2; attempt++){
+      try{
+        const { items, sha } = await readFile(repo, token);
+        const target = items.find(it => it.id === id);
+        if(!target){
+          return res.status(404).json({ error: { message: '해당 id를 찾을 수 없습니다.' } });
+        }
+        target.likes = (target.likes || 0) + 1;
+        const putRes = await writeFile(repo, token, items, sha);
+        if(putRes.ok){
+          return res.status(200).json({ ok: true, likes: target.likes });
+        }
+        if(putRes.status !== 409){
+          const t = await putRes.text();
+          return res.status(502).json({ error: { message: `GitHub 저장 실패 (${putRes.status}) ${t.slice(0,200)}` } });
+        }
+      }catch(e){
+        return res.status(502).json({ error: { message: e.message } });
+      }
+    }
+    return res.status(502).json({ error: { message: '동시 저장 충돌로 실패했습니다. 다시 시도해 주세요.' } });
+  }
+
+  return res.status(405).json({ error: { message: 'GET, POST, PATCH, DELETE만 허용됩니다.' } });
 }
